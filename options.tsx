@@ -8,11 +8,12 @@
   the formik library.
 */
 
-import React, { useEffect, useRef, useState } from "react";
-import { FormControlLabel, FormGroup, IconButton, Switch, TextField, Card, Typography, Box, Button, Tabs, Tab } from "@mui/material";
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import { FormControlLabel, FormGroup, IconButton, Switch, TextField, Card, Typography, Box, Button, Tabs, Tab, Select, MenuItem } from "@mui/material";
 import { get_default_configuration, merge_config } from "./Configuration";
 import DeleteIcon from '@mui/icons-material/Delete';
 import AddIcon from '@mui/icons-material/Add';
+import { endpointUrl } from "~background";
 
 const ConfigurationPanel = ({ closeHandler }) => {
   const [savedState, setSavedState] = useState("Initial");
@@ -73,8 +74,14 @@ const ConfigurationPanel = ({ closeHandler }) => {
   let count = 0;
 
   const handleUpdateSuperTag = (index: number, updatedTag: any) => {
+    console.log("Handling update for tag at index:", index);
+    console.log("Updated tag data:", updatedTag);
+    
     let newconfig = {...configuration};
     newconfig.config.inbox.superTags[index] = updatedTag;
+    
+    console.log("New configuration:", newconfig);
+    
     setSavedState("saving");
     chrome.storage.sync.set({ configuration: newconfig }).then(() => {
       setConfiguration(newconfig);
@@ -82,17 +89,20 @@ const ConfigurationPanel = ({ closeHandler }) => {
     });
   };
 
-  const handleAddSuperTag = () => {
-    let newconfig = {...configuration};
-    newconfig.config.inbox.superTags.push({
+  const handleAddSuperTag = async (setSelectedTab: (index: number) => void) => {
+    const newTag = {
       id: '',
       title: '',
       fields: []
-    });
+    };
+
+    let newconfig = {...configuration};
+    newconfig.config.inbox.superTags.push(newTag);
     setSavedState("saving");
     chrome.storage.sync.set({ configuration: newconfig }).then(() => {
       setConfiguration(newconfig);
       setSavedState("saved");
+      setSelectedTab(newconfig.config.inbox.superTags.length - 1);
     });
   };
 
@@ -111,7 +121,10 @@ const ConfigurationPanel = ({ closeHandler }) => {
   }
   else {
     return (
-      <div style={{ width: 600, height:'100%' }} ref={divRef}>
+      <div style={{ 
+        width: 600, 
+        height:'100%',
+      }} ref={divRef}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h2>Configuration for clip2tana</h2>
           <div style={{ height: 20, width: 200, display: 'flex', justifyContent: 'space-between' }}>
@@ -172,6 +185,7 @@ const ConfigurationPanel = ({ closeHandler }) => {
                         onUpdate={handleUpdateSuperTag}
                         onDelete={handleDeleteSuperTag}
                         onAdd={handleAddSuperTag}
+                        configuration={configuration}
                       />
                     ) : (
                       <Button
@@ -228,8 +242,10 @@ const ConfigurationPanel = ({ closeHandler }) => {
   }
 }
 
-const SuperTagCard = ({ superTags, onUpdate, onDelete, onAdd }) => {
+const SuperTagCard = ({ superTags, onUpdate, onDelete, onAdd, configuration }) => {
   const [selectedTab, setSelectedTab] = useState(0);
+  const [isCreating, setIsCreating] = useState(false);
+  const [createStatus, setCreateStatus] = useState<'idle' | 'creating' | 'success' | 'error'>('idle');
 
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
     setSelectedTab(newValue);
@@ -238,32 +254,180 @@ const SuperTagCard = ({ superTags, onUpdate, onDelete, onAdd }) => {
   // 当前选中的 superTag
   const currentTag = superTags[selectedTab];
 
+  const handleCreateSuperTag = async (index: number, title: string, currentTag: any) => {
+    if (!title.trim() || !configuration.config.inbox.tanaapikey || isCreating) {
+      return;
+    }
+
+    setIsCreating(true);
+    setCreateStatus('creating');
+    
+    try {
+      const payload = {
+        targetNodeId: 'SCHEMA',
+        nodes: [{
+          name: title.trim(),
+          supertags: [{ id: 'SYS_T01' }]
+        }]
+      };
+
+      const response = await fetch(endpointUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: 'Bearer ' + configuration.config.inbox.tanaapikey,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        if (!errorBody.includes("already exists")) {
+          console.error("Failed to create supertag:", errorBody);
+          setCreateStatus('error');
+          return;
+        }
+      }
+
+      // 获取响应数据
+      const responseData = await response.json();
+      console.log("Response data:", responseData);
+      
+      // 从响应中获取 children 数组的第一个元素
+      const createdNode = responseData.children[0];
+      console.log("Created node:", createdNode);
+      
+      if (createdNode && createdNode.nodeId) {
+        console.log("Creating super tag with nodeId:", createdNode.nodeId);
+        console.log("Current tag before update:", currentTag);
+        
+        // 更新 currentTag，包含新的 nodeId 作为 id
+        const updatedTag = { 
+          ...currentTag, 
+          title: title.trim(),
+          id: createdNode.nodeId 
+        };
+        
+        console.log("Updated tag:", updatedTag);
+        onUpdate(index, updatedTag);
+        
+        setCreateStatus('success');
+      } else {
+        console.error("No nodeId found in response");
+        setCreateStatus('error');
+      }
+      
+      setTimeout(() => {
+        setCreateStatus('idle');
+      }, 3000);
+      
+    } catch (error) {
+      console.error("Error creating supertag:", error);
+      setCreateStatus('error');
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const getHelperText = () => {
+    switch (createStatus) {
+      case 'creating':
+        return "Creating super tag...";
+      case 'success':
+        return "Super tag created successfully!";
+      case 'error':
+        return "Failed to create super tag";
+      default:
+        return "";
+    }
+  };
+
+  const getHelperTextColor = () => {
+    switch (createStatus) {
+      case 'creating':
+        return 'text.secondary';
+      case 'success':
+        return 'success.main';
+      case 'error':
+        return 'error.main';
+      default:
+        return 'text.secondary';
+    }
+  };
+
   return (
     <Card sx={{ mb: 2 }}>
-      <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-        <Tabs 
-          value={selectedTab} 
-          onChange={handleTabChange}
-          variant="scrollable"
-          scrollButtons="auto"
-        >
-          {superTags.map((tag, index) => (
-            <Tab 
-              key={index} 
-              label={tag.title || `Tag ${index + 1}`}
-              sx={{ minHeight: '48px' }}
-            />
-          ))}
-          <Tab 
-            icon={<AddIcon />} 
-            aria-label="add tag"
-            onClick={(e) => {
-              e.stopPropagation();
-              onAdd();
+      <Box sx={{  borderColor: 'divider' }}>
+        <Box sx={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          gap: 2,
+          width: '100%',
+          padding: '16px',
+          position: 'relative'
+        }}>
+          <Select
+            value={selectedTab}
+            onChange={(e) => setSelectedTab(Number(e.target.value))}
+            size="small"
+            sx={{ 
+              minWidth: 200,
+              width: 300,
+              '& .MuiSelect-select': {
+                width: '100%',
+                paddingRight: '32px'
+              }
             }}
-            sx={{ minWidth: '48px', minHeight: '48px' }}
-          />
-        </Tabs>
+            MenuProps={{
+              PaperProps: {
+                sx: {
+                  width: 300,
+                  maxHeight: 300
+                }
+              },
+              anchorOrigin: {
+                vertical: 'bottom',
+                horizontal: 'left'
+              },
+              transformOrigin: {
+                vertical: 'top',
+                horizontal: 'left'
+              },
+              disablePortal: true,
+              slotProps: {
+                paper: {
+                  sx: {
+                    position: 'absolute',
+                    zIndex: 1300
+                  }
+                }
+              }
+            }}
+          >
+            {superTags.map((tag, index) => (
+              <MenuItem 
+                key={index} 
+                value={index}
+                sx={{ 
+                  width: '100%',  // 确保菜单项宽度一致
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis'
+                }}
+              >
+                {tag.title || `Tag ${index + 1}`}
+              </MenuItem>
+            ))}
+          </Select>
+          <IconButton 
+            onClick={() => onAdd(setSelectedTab)}
+            size="small"
+            color="primary"
+            sx={{ flexShrink: 0 }}  // 防止按钮被压缩
+          >
+            <AddIcon />
+          </IconButton>
+        </Box>
       </Box>
 
       {currentTag && (
@@ -284,10 +448,24 @@ const SuperTagCard = ({ superTags, onUpdate, onDelete, onAdd }) => {
           <TextField
             label="Super Tag Title"
             value={currentTag.title}
-            onChange={(e) => onUpdate(selectedTab, { ...currentTag, title: e.target.value })}
+            onChange={(e) => {
+              onUpdate(selectedTab, { ...currentTag, title: e.target.value });
+            }}
+            onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+              if (e.key === 'Enter') {
+                console.log("Enter key pressed");
+                e.preventDefault();
+                handleCreateSuperTag(selectedTab, currentTag.title, currentTag);
+              }
+            }}
             fullWidth
             size="small"
             sx={{ mb: 2 }}
+            disabled={isCreating}
+            helperText={getHelperText() || "Press Enter to create"}
+            FormHelperTextProps={{
+              sx: { color: getHelperTextColor() }
+            }}
           />
           
           <TextField
@@ -336,6 +514,30 @@ const SuperTagCard = ({ superTags, onUpdate, onDelete, onAdd }) => {
           >
             Add Field
           </Button>
+          
+          <Typography 
+            variant="caption" 
+            color="textSecondary" 
+            sx={{ 
+              display: 'block', 
+              mt: 2, 
+              mb: 1,
+              '& ol': {
+                margin: '8px 0 0 0',
+                paddingLeft: '20px'
+              },
+              '& li': {
+                marginBottom: '4px'
+              }
+            }}
+          >
+            Note: For new Super Tags, you need to get the ID from Tana client:
+            <ol>
+              <li>Open the supertag configuration panel in Tana</li>
+              <li>Run "Show API Schema" command on the supertag title</li>
+              <li>Copy the ID and paste it into the "Super Tag ID" field above</li>
+            </ol>
+          </Typography>
         </Box>
       )}
     </Card>
